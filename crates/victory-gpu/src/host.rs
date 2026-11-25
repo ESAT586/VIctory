@@ -3644,6 +3644,45 @@ fn pump() {
 mod batch {   // `mod tests` is already taken at the top of this file
     use super::Batch;
 
+    /// The first and second uses of the same closed list read different
+    /// values when an intervening list updates its source.
+    #[test]
+    fn a_closed_list_can_run_twice_in_one_submission() {
+        use super::transition;
+        use windows::Win32::Graphics::Direct3D12::*;
+        let Some(host) = super::host() else {
+            return;
+        };
+        let (src, src_cpu) = host.shared_buffer(4).unwrap();
+        let (replacement, replacement_cpu) = host.shared_buffer(4).unwrap();
+        let (out, out_cpu) = host.shared_buffer(4).unwrap();
+        let (first, first_cpu) = host.shared_buffer(4).unwrap();
+        let repeated = host.new_list().unwrap();
+        let between = host.new_list().unwrap();
+        // SAFETY: mapped buffers of four bytes and open lists. The source
+        // and output return to COMMON so the copies can promote them again.
+        unsafe {
+            src_cpu.cast::<u32>().write(81);
+            replacement_cpu.cast::<u32>().write(82);
+            repeated.list.CopyBufferRegion(&out, 0, &src, 0, 4);
+            repeated.list.ResourceBarrier(&[
+                transition(&src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                transition(&out, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
+            ]);
+            between.list.CopyBufferRegion(&first, 0, &out, 0, 4);
+            between.list.CopyBufferRegion(&src, 0, &replacement, 0, 4);
+            between.list.ResourceBarrier(&[
+                transition(&out, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                transition(&src, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
+            ]);
+        }
+        repeated.close();
+        between.close();
+        host.execute(&[&repeated, &between, &repeated]);
+        // SAFETY: execution completed and the buffers are still mapped.
+        assert_eq!(unsafe { (first_cpu.cast::<u32>().read(), out_cpu.cast::<u32>().read()) }, (81, 82));
+    }
+
     /// A host copy of tracked title memory: a submission whose lists all ask
     /// for it whole copies the one page the title wrote, once, and again
     /// only after a step that writes title memory.
